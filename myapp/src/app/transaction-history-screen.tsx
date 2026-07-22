@@ -87,7 +87,7 @@ export default function TransactionHistoryScreen() {
 
         <View style={styles.summaryFooter}>
           <Text style={styles.summaryFooterLabel}>Filtered spending</Text>
-          <Text style={styles.summaryFooterValue}>${totalSpent.toFixed(2)}</Text>
+          <Text style={styles.summaryFooterValue}>P{totalSpent.toFixed(2)}</Text>
         </View>
       </View>
 
@@ -179,7 +179,7 @@ export default function TransactionHistoryScreen() {
                 <View style={styles.sessionTopRow}>
                   <View style={styles.sessionInfo}>
                     <Text style={styles.sessionDate}>{dateLabel}</Text>
-                    <Text style={styles.sessionMeta}>Budget: ${session.budget.toFixed(2)}</Text>
+                    <Text style={styles.sessionMeta}>Budget: P{session.budget.toFixed(2)}</Text>
                   </View>
 
                   <View style={[styles.statusBadge, statusStyle]}>
@@ -188,7 +188,7 @@ export default function TransactionHistoryScreen() {
                 </View>
 
                 <View style={styles.sessionBottomRow}>
-                  <Text style={styles.sessionTotal}>${session.total.toFixed(2)}</Text>
+                  <Text style={styles.sessionTotal}>P{session.total.toFixed(2)}</Text>
                   <Text style={styles.sessionHint}>
                     {session.finishedAt ? "Saved session" : "Current session"}
                   </Text>
@@ -237,10 +237,15 @@ const styles = StyleSheet.create({
   summaryCard: {
     backgroundColor: "#FFFFFF",
     borderRadius: 20,
-    padding: 18,
+    padding: 20,
     borderWidth: 1,
     borderColor: "#E7E4DA",
     gap: 14,
+    shadowColor: "#000",
+    shadowOpacity: 0.04,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 2,
   },
   summaryRow: {
     flexDirection: "row",
@@ -250,12 +255,13 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: "#F4F2E9",
     borderRadius: 16,
-    padding: 14,
+    padding: 16,
   },
   summaryValue: {
-    fontSize: 28,
+    fontSize: 30,
     fontWeight: "900",
     color: "#111111",
+    letterSpacing: -0.5,
   },
   summaryLabel: {
     marginTop: 2,
@@ -336,10 +342,15 @@ const styles = StyleSheet.create({
   sessionCard: {
     backgroundColor: "#FFFFFF",
     borderRadius: 18,
-    padding: 16,
+    padding: 18,
     borderWidth: 1,
     borderColor: "#E7E4DA",
     gap: 14,
+    shadowColor: "#000",
+    shadowOpacity: 0.03,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 1 },
+    elevation: 1,
   },
   sessionTopRow: {
     flexDirection: "row",
@@ -385,9 +396,10 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
   },
   sessionTotal: {
-    fontSize: 22,
+    fontSize: 24,
     fontWeight: "900",
     color: "#111111",
+    letterSpacing: -0.5,
   },
   sessionHint: {
     fontSize: 13,

@@ -192,7 +192,7 @@ export default function HomeScreen() {
             <Text style={styles.actionButtonText}>View History</Text>
           </Pressable>
           <Pressable style={styles.actionButton} onPress={() => router.push("/item-details-screen")}>
-            <Text style={styles.actionButtonText}>Search Items</Text>
+            <Text style={styles.actionButtonText}>Items</Text>
           </Pressable>
           <Pressable style={styles.actionButton} onPress={() => router.push("/store-details-screen")}>
             <Text style={styles.actionButtonText}>Manage Stores</Text>
@@ -257,7 +257,7 @@ export default function HomeScreen() {
               ))}
             </View>
 
-            <Text style={styles.label}>Budget ($)</Text>
+            <Text style={styles.label}>Budget (P)</Text>
             <TextInput
               value={budget}
               onChangeText={setBudget}
@@ -302,10 +302,15 @@ const styles = StyleSheet.create({
   summaryCard: {
     backgroundColor: "#FFFFFF",
     borderRadius: 20,
-    padding: 18,
+    padding: 20,
     gap: 8,
     borderWidth: 1,
     borderColor: "#E7E4DA",
+    shadowColor: "#000",
+    shadowOpacity: 0.04,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 2,
   },
   sectionLabel: {
     fontSize: 12,
@@ -332,12 +337,17 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: "#FFFFFF",
     borderRadius: 18,
-    padding: 16,
+    padding: 18,
     borderWidth: 1,
     borderColor: "#E7E4DA",
     gap: 6,
+    shadowColor: "#000",
+    shadowOpacity: 0.03,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 1 },
+    elevation: 1,
   },
-  statValue: { fontSize: 26, fontWeight: "800", color: "#111111" },
+  statValue: { fontSize: 28, fontWeight: "800", color: "#111111", letterSpacing: -0.5 },
   statHint: { fontSize: 13, color: "#5B5B53" },
   section: { gap: 12 },
   sectionTitle: { fontSize: 18, fontWeight: "800", color: "#111111" },
@@ -359,9 +369,14 @@ const styles = StyleSheet.create({
     backgroundColor: "#FFFFFF",
     borderRadius: 16,
     paddingHorizontal: 16,
-    paddingVertical: 14,
+    paddingVertical: 16,
     borderWidth: 1,
     borderColor: "#E7E4DA",
+    shadowColor: "#000",
+    shadowOpacity: 0.03,
+    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 1 },
+    elevation: 1,
   },
   itemInfo: { gap: 3 },
   itemName: { fontSize: 16, fontWeight: "700", color: "#111111" },
@@ -380,12 +395,12 @@ const styles = StyleSheet.create({
   },
   modalCard: {
     backgroundColor: "#FFFFFF",
-    borderTopLeftRadius: 28,
-    borderTopRightRadius: 28,
-    padding: 24,
-    gap: 12,
+    borderTopLeftRadius: 32,
+    borderTopRightRadius: 32,
+    padding: 28,
+    gap: 14,
   },
-  modalTitle: { fontSize: 22, fontWeight: "800", color: "#111111", marginBottom: 4 },
+  modalTitle: { fontSize: 24, fontWeight: "800", color: "#111111", marginBottom: 4 },
   label: { fontSize: 13, fontWeight: "700", color: "#5B5B53" },
   storeList: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   storeOption: {
