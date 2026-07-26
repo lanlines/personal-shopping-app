@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
+  Modal,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -56,7 +57,7 @@ export default function StoreDetailsScreen() {
   const [stores, setStores] = useState<Store[]>([]);
   const [items, setItems] = useState<Item[]>([]);
   const [sessions, setSessions] = useState<ShoppingSession[]>([]);
-  const [selectedStoreId, setSelectedStoreId] = useState<number | null>(null);
+  const [sheetStore, setSheetStore] = useState<Store | null>(null);
   const [storePrices, setStorePrices] = useState<StorePriceRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [priceLoading, setPriceLoading] = useState(false);
@@ -69,11 +70,6 @@ export default function StoreDetailsScreen() {
   const [selectedItemId, setSelectedItemId] = useState<number | null>(null);
   const [priceInput, setPriceInput] = useState("");
 
-  const selectedStore = useMemo(
-    () => stores.find((store) => store.id === selectedStoreId) ?? null,
-    [selectedStoreId, stores]
-  );
-
   const selectedItem = useMemo(
     () => items.find((item) => item.id === selectedItemId) ?? null,
     [items, selectedItemId]
@@ -81,21 +77,14 @@ export default function StoreDetailsScreen() {
 
   const filteredItems = useMemo(() => {
     const query = itemQuery.trim().toLowerCase();
-
-    if (!query) {
-      return items;
-    }
-
+    if (!query) return items;
     return items.filter((item) => item.name.toLowerCase().includes(query));
   }, [itemQuery, items]);
 
-  const selectedStoreSessions = useMemo(() => {
-    if (!selectedStore) {
-      return [];
-    }
-
-    return sessions.filter((session) => session.storeId === selectedStore.id).slice(0, 4);
-  }, [selectedStore, sessions]);
+  const sheetStoreSessions = useMemo(() => {
+    if (!sheetStore) return [];
+    return sessions.filter((s) => s.storeId === sheetStore.id).slice(0, 4);
+  }, [sheetStore, sessions]);
 
   const storePriceSummary = useMemo(() => {
     const count = storePrices.length;
@@ -136,51 +125,34 @@ export default function StoreDetailsScreen() {
     setStores(nextStores);
     setItems(nextItems);
     setSessions(nextSessions);
-
-    setSelectedStoreId((currentValue) => {
-      if (currentValue && nextStores.some((store) => store.id === currentValue)) {
-        return currentValue;
-      }
-
-      return nextStores[0]?.id ?? null;
-    });
-
-    setSelectedItemId((currentValue) => {
-      if (currentValue && nextItems.some((item) => item.id === currentValue)) {
-        return currentValue;
-      }
-
-      return nextItems[0]?.id ?? null;
-    });
-
     setLoading(false);
   };
 
   const loadStorePrices = async (storeId: number) => {
     setPriceLoading(true);
     const result = await listPricesByStore(storeId);
-
-    if (result.ok) {
-      setStorePrices(result.data);
-    } else {
-      setStorePrices([]);
-    }
-
+    setStorePrices(result.ok ? result.data : []);
     setPriceLoading(false);
+  };
+
+  const openSheet = async (store: Store) => {
+    setSheetStore(store);
+    setItemQuery("");
+    setPriceInput("");
+    setSelectedItemId(items[0]?.id ?? null);
+    await loadStorePrices(store.id);
+  };
+
+  const closeSheet = () => {
+    setSheetStore(null);
+    setStorePrices([]);
+    setItemQuery("");
+    setPriceInput("");
   };
 
   useEffect(() => {
     loadData();
   }, []);
-
-  useEffect(() => {
-    if (!selectedStoreId) {
-      setStorePrices([]);
-      return;
-    }
-
-    loadStorePrices(selectedStoreId);
-  }, [selectedStoreId]);
 
   const handleCreate = async () => {
     const trimmed = newName.trim();
@@ -245,7 +217,7 @@ export default function StoreDetailsScreen() {
   };
 
   const handleSavePrice = async () => {
-    if (!selectedStoreId) {
+    if (!sheetStore) {
       Alert.alert("Missing store", "Create or select a store first.");
       return;
     }
@@ -264,7 +236,7 @@ export default function StoreDetailsScreen() {
 
     setSavingPrice(true);
     const result = await upsertStoreItemPrice({
-      storeId: selectedStoreId,
+      storeId: sheetStore.id,
       itemId: selectedItemId,
       latestPrice: parsedPrice,
     });
@@ -276,7 +248,7 @@ export default function StoreDetailsScreen() {
     }
 
     setPriceInput("");
-    await loadStorePrices(selectedStoreId);
+    await loadStorePrices(sheetStore.id);
   };
 
   return (
@@ -322,13 +294,7 @@ export default function StoreDetailsScreen() {
           ) : (
             <View style={styles.listContent}>
               {stores.map((item) => (
-                <View
-                  key={item.id}
-                  style={[
-                    styles.storeCard,
-                    selectedStoreId === item.id && styles.storeCardActive,
-                  ]}
-                >
+                <View key={item.id} style={styles.storeCard}>
                   {editingId === item.id ? (
                     <View style={styles.editRow}>
                       <TextInput
@@ -345,186 +311,29 @@ export default function StoreDetailsScreen() {
                       </Pressable>
                     </View>
                   ) : (
-                    <View style={styles.storeRow}>
+                    <Pressable style={styles.storeRow} onPress={() => openSheet(item)}>
                       <View style={styles.storeInfo}>
                         <Text style={styles.storeName}>{item.name}</Text>
-                        <Text style={styles.storeMeta}>
-                          {selectedStoreId === item.id ? "Selected for price entry" : `ID: ${item.id}`}
-                        </Text>
+                        <Text style={styles.storeMeta}>Tap to view prices</Text>
                       </View>
                       <View style={styles.storeActions}>
-                        <Pressable style={styles.actionButton} onPress={() => setSelectedStoreId(item.id)}>
-                          <Text style={styles.actionButtonText}>Prices</Text>
-                        </Pressable>
-                        <Pressable style={styles.actionButton} onPress={() => handleStartEdit(item)}>
+                        <Pressable
+                          style={styles.actionButton}
+                          onPress={(e) => { e.stopPropagation(); handleStartEdit(item); }}
+                        >
                           <Text style={styles.actionButtonText}>Edit</Text>
                         </Pressable>
                         <Pressable
                           style={[styles.actionButton, styles.deleteButton]}
-                          onPress={() => handleDelete(item)}
+                          onPress={(e) => { e.stopPropagation(); handleDelete(item); }}
                         >
                           <Text style={styles.actionButtonText}>Delete</Text>
                         </Pressable>
                       </View>
-                    </View>
+                    </Pressable>
                   )}
                 </View>
               ))}
-            </View>
-          )}
-        </View>
-
-        <View style={styles.sectionSpacing}>
-          <Text style={styles.sectionTitle}>Store Prices</Text>
-
-          {!selectedStore ? (
-            <View style={styles.emptyState}>
-              <Text style={styles.emptyTitle}>No store selected</Text>
-              <Text style={styles.emptyText}>Pick a store to view and edit its prices.</Text>
-            </View>
-          ) : (
-            <View style={styles.detailsCard}>
-              <View style={styles.detailsHeader}>
-                <View style={styles.detailsCopy}>
-                  <Text style={styles.detailsTitle}>{selectedStore.name}</Text>
-                  <Text style={styles.detailsSubtitle}>Store-specific prices and recent visits.</Text>
-                </View>
-                <Text style={styles.detailsBadge}>{storePrices.length} prices</Text>
-              </View>
-
-              <View style={styles.summaryRow}>
-                <View style={styles.summaryBlock}>
-                  <Text style={styles.summaryValue}>{storePrices.length}</Text>
-                  <Text style={styles.summaryLabel}>Price links</Text>
-                </View>
-                <View style={styles.summaryBlock}>
-                  <Text style={styles.summaryValue}>
-                    {storePrices.length > 0 ? formatMoney(storePriceSummary.averagePrice) : "-"}
-                  </Text>
-                  <Text style={styles.summaryLabel}>Average price</Text>
-                </View>
-              </View>
-
-              <View style={styles.summaryFooter}>
-                <Text style={styles.summaryFooterLabel}>Latest update</Text>
-                <Text style={styles.summaryFooterValue}>
-                  {storePriceSummary.latestUpdate
-                    ? `${storePriceSummary.latestItem ?? "Item"} • ${formatDate(storePriceSummary.latestUpdate)}`
-                    : "No price history yet"}
-                </Text>
-              </View>
-
-              <View style={styles.formStack}>
-                <Text style={styles.subsectionTitle}>Add or update a price</Text>
-
-                <TextInput
-                  value={itemQuery}
-                  onChangeText={setItemQuery}
-                  placeholder="Search items..."
-                  style={styles.searchInput}
-                  placeholderTextColor="#8C8C81"
-                />
-
-                <View style={styles.itemPicker}>
-                  {filteredItems.length === 0 ? (
-                    <View style={styles.emptyInline}>
-                      <Text style={styles.emptyTitle}>No items found</Text>
-                      <Text style={styles.emptyText}>Create an item first, then link a price here.</Text>
-                    </View>
-                  ) : (
-                    filteredItems.slice(0, 8).map((item) => (
-                      <Pressable
-                        key={item.id}
-                        style={[
-                          styles.itemPickRow,
-                          selectedItemId === item.id && styles.itemPickRowActive,
-                        ]}
-                        onPress={() => setSelectedItemId(item.id)}
-                      >
-                        <Text style={styles.itemPickName}>{item.name}</Text>
-                        {selectedItemId === item.id ? (
-                          <Text style={styles.itemPickMeta}>Selected</Text>
-                        ) : null}
-                      </Pressable>
-                    ))
-                  )}
-                </View>
-
-                <View style={styles.selectionSummary}>
-                  <Text style={styles.selectionLabel}>Selected item</Text>
-                  <Text style={styles.selectionValue}>{selectedItem?.name ?? "None"}</Text>
-                </View>
-
-                <TextInput
-                  value={priceInput}
-                  onChangeText={setPriceInput}
-                  placeholder="3.49"
-                  keyboardType="decimal-pad"
-                  style={styles.input}
-                  placeholderTextColor="#8C8C81"
-                />
-
-                <Pressable
-                  style={[styles.primaryButton, savingPrice && styles.disabledButton]}
-                  onPress={handleSavePrice}
-                  disabled={savingPrice}
-                >
-                  <Text style={styles.primaryButtonText}>
-                    {savingPrice ? "Saving..." : "Save Price"}
-                  </Text>
-                </Pressable>
-              </View>
-
-              <View style={styles.historyBlock}>
-                <Text style={styles.subsectionTitle}>Price history</Text>
-
-                {priceLoading ? (
-                  <View style={styles.loadingRow}>
-                    <ActivityIndicator />
-                    <Text style={styles.loadingText}>Loading prices...</Text>
-                  </View>
-                ) : storePrices.length === 0 ? (
-                  <View style={styles.emptyInline}>
-                    <Text style={styles.emptyTitle}>No store prices yet</Text>
-                    <Text style={styles.emptyText}>
-                      Save a price above to start building history for this store.
-                    </Text>
-                  </View>
-                ) : (
-                  storePrices.map((row) => (
-                    <View key={row.itemId} style={styles.historyRow}>
-                      <View style={styles.historyCopy}>
-                        <Text style={styles.rowTitle}>{row.itemName}</Text>
-                        <Text style={styles.rowMeta}>Updated {formatDate(row.updatedAt)}</Text>
-                      </View>
-                      <Text style={styles.rowValue}>{formatMoney(row.latestPrice)}</Text>
-                    </View>
-                  ))
-                )}
-              </View>
-
-              <View style={styles.historyBlock}>
-                <Text style={styles.subsectionTitle}>Recent visits</Text>
-
-                {selectedStoreSessions.length === 0 ? (
-                  <View style={styles.emptyInline}>
-                    <Text style={styles.emptyTitle}>No sessions for this store</Text>
-                    <Text style={styles.emptyText}>
-                      Start a shopping session here to see recent visits.
-                    </Text>
-                  </View>
-                ) : (
-                  selectedStoreSessions.map((session) => (
-                    <View key={session.id} style={styles.historyRow}>
-                      <View style={styles.historyCopy}>
-                        <Text style={styles.rowTitle}>Session #{session.id}</Text>
-                        <Text style={styles.rowMeta}>{formatDate(session.createdAt)}</Text>
-                      </View>
-                      <Text style={styles.rowValue}>{formatMoney(session.total)}</Text>
-                    </View>
-                  ))
-                )}
-              </View>
             </View>
           )}
         </View>
@@ -533,6 +342,160 @@ export default function StoreDetailsScreen() {
           <Text style={styles.backButtonText}>Back to Home</Text>
         </Pressable>
       </ScrollView>
+
+      <Modal
+        visible={sheetStore !== null}
+        transparent
+        animationType="slide"
+        onRequestClose={closeSheet}
+      >
+        <Pressable style={styles.backdrop} onPress={closeSheet} />
+        <View style={styles.sheet}>
+          <View style={styles.sheetHandle} />
+
+          <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.sheetContent}>
+            {/* Header */}
+            <View style={styles.sheetHeader}>
+              <View style={{ flex: 1, gap: 3 }}>
+                <Text style={styles.sheetTitle}>{sheetStore?.name}</Text>
+                <Text style={styles.sheetSubtitle}>Store-specific prices and recent visits.</Text>
+              </View>
+              <Text style={styles.sheetBadge}>{storePrices.length} prices</Text>
+            </View>
+
+            {/* Stats */}
+            <View style={styles.statsRow}>
+              <View style={styles.statBlock}>
+                <Text style={styles.statValue}>{storePrices.length}</Text>
+                <Text style={styles.statLabel}>Price links</Text>
+              </View>
+              <View style={styles.statBlock}>
+                <Text style={styles.statValue}>
+                  {storePrices.length > 0 ? formatMoney(storePriceSummary.averagePrice) : "—"}
+                </Text>
+                <Text style={styles.statLabel}>Avg price</Text>
+              </View>
+              <View style={styles.statBlock}>
+                <Text style={styles.statValue}>{sheetStoreSessions.length}</Text>
+                <Text style={styles.statLabel}>Visits</Text>
+              </View>
+            </View>
+
+            {/* Add / update price */}
+            <Text style={styles.subsectionTitle}>Add or update a price</Text>
+
+            <TextInput
+              value={itemQuery}
+              onChangeText={setItemQuery}
+              placeholder="Search items..."
+              style={styles.searchInput}
+              placeholderTextColor="#8C8C81"
+            />
+
+            <ScrollView
+              style={styles.itemPicker}
+              nestedScrollEnabled
+              showsVerticalScrollIndicator={false}
+            >
+              {filteredItems.length === 0 ? (
+                <View style={styles.emptyInline}>
+                  <Text style={styles.emptyTitle}>No items found</Text>
+                  <Text style={styles.emptyText}>Create an item first.</Text>
+                </View>
+              ) : (
+                filteredItems.slice(0, 8).map((item) => (
+                  <Pressable
+                    key={item.id}
+                    style={[
+                      styles.itemPickRow,
+                      selectedItemId === item.id && styles.itemPickRowActive,
+                    ]}
+                    onPress={() => setSelectedItemId(item.id)}
+                  >
+                    <Text style={styles.itemPickName}>{item.name}</Text>
+                    {selectedItemId === item.id && (
+                      <Text style={styles.itemPickMeta}>Selected</Text>
+                    )}
+                  </Pressable>
+                ))
+              )}
+            </ScrollView>
+
+            <View style={styles.selectionSummary}>
+              <Text style={styles.selectionLabel}>Selected item</Text>
+              <Text style={styles.selectionValue}>{selectedItem?.name ?? "None"}</Text>
+            </View>
+
+            <TextInput
+              value={priceInput}
+              onChangeText={setPriceInput}
+              placeholder="0.00"
+              keyboardType="decimal-pad"
+              style={styles.input}
+              placeholderTextColor="#8C8C81"
+            />
+
+            <Pressable
+              style={[styles.primaryButton, savingPrice && styles.disabledButton]}
+              onPress={handleSavePrice}
+              disabled={savingPrice}
+            >
+              <Text style={styles.primaryButtonText}>
+                {savingPrice ? "Saving..." : "Save Price"}
+              </Text>
+            </Pressable>
+
+            {/* Price history */}
+            <Text style={styles.subsectionTitle}>Price history</Text>
+
+            {priceLoading ? (
+              <View style={styles.loadingRow}>
+                <ActivityIndicator />
+                <Text style={styles.loadingText}>Loading prices...</Text>
+              </View>
+            ) : storePrices.length === 0 ? (
+              <View style={styles.emptyInline}>
+                <Text style={styles.emptyTitle}>No prices yet</Text>
+                <Text style={styles.emptyText}>Save a price above to start building history.</Text>
+              </View>
+            ) : (
+              storePrices.map((row) => (
+                <View key={row.itemId} style={styles.historyRow}>
+                  <View style={styles.historyCopy}>
+                    <Text style={styles.rowTitle}>{row.itemName}</Text>
+                    <Text style={styles.rowMeta}>Updated {formatDate(row.updatedAt)}</Text>
+                  </View>
+                  <Text style={styles.rowValue}>{formatMoney(row.latestPrice)}</Text>
+                </View>
+              ))
+            )}
+
+            {/* Recent visits */}
+            <Text style={styles.subsectionTitle}>Recent visits</Text>
+
+            {sheetStoreSessions.length === 0 ? (
+              <View style={styles.emptyInline}>
+                <Text style={styles.emptyTitle}>No visits yet</Text>
+                <Text style={styles.emptyText}>Start a shopping session here to see visits.</Text>
+              </View>
+            ) : (
+              sheetStoreSessions.map((session) => (
+                <View key={session.id} style={styles.historyRow}>
+                  <View style={styles.historyCopy}>
+                    <Text style={styles.rowTitle}>Session #{session.id}</Text>
+                    <Text style={styles.rowMeta}>{formatDate(session.createdAt)}</Text>
+                  </View>
+                  <Text style={styles.rowValue}>{formatMoney(session.total)}</Text>
+                </View>
+              ))
+            )}
+
+            <Pressable style={[styles.primaryButton, { marginTop: 8 }]} onPress={closeSheet}>
+              <Text style={styles.primaryButtonText}>Close</Text>
+            </Pressable>
+          </ScrollView>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -620,9 +583,61 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 1 },
     elevation: 1,
   },
-  storeCardActive: {
-    borderColor: "#111111",
+  backdrop: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.4)",
   },
+  sheet: {
+    backgroundColor: "#F7F7F2",
+    borderTopLeftRadius: 28,
+    borderTopRightRadius: 28,
+    maxHeight: "88%",
+    paddingBottom: 32,
+  },
+  sheetHandle: {
+    width: 40,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: "#D0CEC5",
+    alignSelf: "center",
+    marginTop: 12,
+    marginBottom: 4,
+  },
+  sheetContent: {
+    paddingHorizontal: 24,
+    paddingTop: 8,
+    paddingBottom: 16,
+    gap: 12,
+  },
+  sheetHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "flex-start",
+    gap: 12,
+  },
+  sheetTitle: { fontSize: 24, fontWeight: "900", color: "#111111", letterSpacing: -0.5 },
+  sheetSubtitle: { fontSize: 13, color: "#6B6B63" },
+  sheetBadge: {
+    fontSize: 12,
+    fontWeight: "800",
+    color: "#111111",
+    backgroundColor: "#F4F2E9",
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    overflow: "hidden",
+  },
+  statsRow: { flexDirection: "row", gap: 8 },
+  statBlock: {
+    flex: 1,
+    backgroundColor: "#F4F2E9",
+    borderRadius: 14,
+    padding: 12,
+    alignItems: "center",
+    gap: 4,
+  },
+  statValue: { fontSize: 16, fontWeight: "900", color: "#111111", textAlign: "center" },
+  statLabel: { fontSize: 11, fontWeight: "700", color: "#6B6B63", textTransform: "uppercase" },
   storeRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -662,56 +677,7 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   cancelButtonText: { fontSize: 13, fontWeight: "700", color: "#111111" },
-  detailsCard: {
-    backgroundColor: "#FFFFFF",
-    borderRadius: 20,
-    padding: 20,
-    borderWidth: 1,
-    borderColor: "#E7E4DA",
-    gap: 16,
-    shadowColor: "#000",
-    shadowOpacity: 0.04,
-    shadowRadius: 8,
-    shadowOffset: { width: 0, height: 2 },
-    elevation: 2,
-  },
-  detailsHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "flex-start",
-    gap: 12,
-  },
-  detailsCopy: { flex: 1, gap: 4 },
-  detailsTitle: { fontSize: 20, fontWeight: "800", color: "#111111" },
-  detailsSubtitle: { fontSize: 14, color: "#5B5B53" },
-  detailsBadge: {
-    fontSize: 12,
-    fontWeight: "800",
-    color: "#111111",
-    backgroundColor: "#F4F2E9",
-    borderRadius: 999,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    overflow: "hidden",
-  },
-  summaryRow: { flexDirection: "row", gap: 12 },
-  summaryBlock: {
-    flex: 1,
-    backgroundColor: "#F4F2E9",
-    borderRadius: 16,
-    padding: 14,
-  },
-  summaryValue: { fontSize: 24, fontWeight: "900", color: "#111111" },
-  summaryLabel: { marginTop: 4, fontSize: 13, color: "#5B5B53" },
-  summaryFooter: {
-    backgroundColor: "#FBFBF7",
-    borderRadius: 16,
-    padding: 14,
-    gap: 4,
-  },
-  summaryFooterLabel: { fontSize: 12, fontWeight: "800", color: "#6B6B63", textTransform: "uppercase" },
-  summaryFooterValue: { fontSize: 14, color: "#111111", fontWeight: "700" },
-  formStack: { gap: 12 },
+
   itemPicker: { gap: 8, maxHeight: 220 },
   itemPickRow: {
     borderWidth: 1,
@@ -739,7 +705,6 @@ const styles = StyleSheet.create({
   },
   selectionLabel: { fontSize: 12, fontWeight: "800", color: "#6B6B63", textTransform: "uppercase" },
   selectionValue: { fontSize: 14, fontWeight: "700", color: "#111111" },
-  historyBlock: { gap: 10 },
   historyRow: {
     flexDirection: "row",
     alignItems: "center",
