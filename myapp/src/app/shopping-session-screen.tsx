@@ -1,18 +1,25 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
   FlatList,
+  Keyboard,
+  Modal,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useLocalSearchParams, useRouter } from "expo-router";
-import { getItemById } from "../db/repositories/items.repository";
+import { useRouter } from "expo-router";
+import { createItem, searchItems, getItemById } from "../db/repositories/items.repository";
 import { getStoreById } from "../db/repositories/stores.repository";
+import { getLatestPriceForItemAtStore, upsertStoreItemPrice } from "../db/repositories/store-items.repository";
 import {
+  addSessionItem,
+  decrementSessionItemQuantity,
   deleteSessionItem,
   listItemsBySession,
   markSessionItemPurchased,
@@ -21,9 +28,8 @@ import {
 import {
   finishShoppingSession,
   getActiveShoppingSession,
-  getShoppingSessionById,
 } from "../db/repositories/shopping-sessions.repository";
-import type { ShoppingSession, ShoppingSessionItem } from "../db/types";
+import type { Item, ShoppingSession, ShoppingSessionItem } from "../db/types";
 
 type SessionItemRow = ShoppingSessionItem & {
   name: string;
@@ -32,21 +38,6 @@ type SessionItemRow = ShoppingSessionItem & {
 
 export default function ShoppingSessionScreen() {
   const router = useRouter();
-  const params = useLocalSearchParams<{ sessionId?: string | string[] }>();
-
-  const requestedSessionId = useMemo(() => {
-    const value = params.sessionId;
-    const rawValue = Array.isArray(value) ? value[0] : value;
-
-    if (!rawValue) {
-      return null;
-    }
-
-    const parsed = Number(rawValue);
-    return Number.isFinite(parsed) ? parsed : null;
-  }, [params.sessionId]);
-
-  const readOnlySession = requestedSessionId !== null;
 
   const [session, setSession] = useState<ShoppingSession | null>(null);
   const [storeName, setStoreName] = useState("");
@@ -55,36 +46,45 @@ export default function ShoppingSessionScreen() {
   const [busyItemId, setBusyItemId] = useState<number | null>(null);
   const [savingSession, setSavingSession] = useState(false);
 
+  // modal state
+  const [modalVisible, setModalVisible] = useState(false);
+  const [itemName, setItemName] = useState("");
+  const [itemQuantity, setItemQuantity] = useState("1");
+  const [itemPrice, setItemPrice] = useState("");
+  const [searchResults, setSearchResults] = useState<Item[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [priceError, setPriceError] = useState(false);
+  const nameInputRef = useRef<TextInput>(null);
+  const priceInputRef = useRef<TextInput>(null);
+
   const loadSession = async () => {
     setLoading(true);
 
-    const sessionResult =
-      requestedSessionId !== null
-        ? await getShoppingSessionById(requestedSessionId)
-        : await getActiveShoppingSession();
+    const activeSessionResult = await getActiveShoppingSession();
 
-    if (!sessionResult.ok) {
+    if (!activeSessionResult.ok) {
       setSession(null);
       setItems([]);
       setLoading(false);
       return;
     }
 
-    const selectedSession = sessionResult.data;
-    setSession(selectedSession);
+    const activeSession = activeSessionResult.data;
+    setSession(activeSession);
 
-    if (!selectedSession) {
+    if (!activeSession) {
       setItems([]);
       setLoading(false);
       return;
     }
 
-    const storeResult = await getStoreById(selectedSession.storeId);
+    const storeResult = await getStoreById(activeSession.storeId);
     const resolvedStoreName =
       storeResult.ok && storeResult.data ? storeResult.data.name : "Unknown store";
     setStoreName(resolvedStoreName);
 
-    const itemsResult = await listItemsBySession(selectedSession.id);
+    const itemsResult = await listItemsBySession(activeSession.id);
 
     if (!itemsResult.ok) {
       setItems([]);
@@ -96,7 +96,6 @@ export default function ShoppingSessionScreen() {
 
     for (const sessionItem of itemsResult.data) {
       const itemResult = await getItemById(sessionItem.itemId);
-
       resolvedItems.push({
         ...sessionItem,
         name: itemResult.ok && itemResult.data ? itemResult.data.name : "Unknown item",
@@ -110,61 +109,160 @@ export default function ShoppingSessionScreen() {
 
   useEffect(() => {
     let isMounted = true;
-
     async function initialize() {
       await loadSession();
-      if (!isMounted) {
-        return;
-      }
+      if (!isMounted) return;
     }
-
     initialize();
-
-    return () => {
-      isMounted = false;
-    };
+    return () => { isMounted = false; };
   }, []);
 
-  const runningTotal = useMemo(() => {
-    return session?.total ?? 0;
-  }, [session]);
-
-  const remainingBudget = useMemo(() => {
-    if (!session) {
-      return 0;
+  // debounced search — fires 350ms after user stops typing
+  useEffect(() => {
+    if (!itemName.trim()) {
+      setSearchResults([]);
+      setSearching(false);
+      return;
     }
 
+    setSearching(true);
+    const timer = setTimeout(async () => {
+      const result = await searchItems(itemName.trim());
+      setSearchResults(result.ok ? result.data.slice(0, 5) : []);
+      setSearching(false);
+    }, 350);
+
+    return () => clearTimeout(timer);
+  }, [itemName]);
+
+  const openModal = () => {
+    setItemName("");
+    setItemQuantity("1");
+    setItemPrice("");
+    setSearchResults([]);
+    setPriceError(false);
+    setModalVisible(true);
+    setTimeout(() => nameInputRef.current?.focus(), 100);
+  };
+
+  const closeModal = () => {
+    Keyboard.dismiss();
+    setModalVisible(false);
+    setPriceError(false);
+  };
+
+  const handlePickSuggestion = async (item: Item) => {
+    setItemName(item.name);
+    setSearchResults([]);
+    setPriceError(false);
+
+    if (session) {
+      const priceResult = await getLatestPriceForItemAtStore(session.storeId, item.id);
+      if (priceResult.ok && priceResult.data !== null) {
+        setItemPrice(String(priceResult.data));
+      } else {
+        // No stored price for this item at this store — focus price field
+        setItemPrice("");
+        setTimeout(() => priceInputRef.current?.focus(), 100);
+      }
+    }
+  };
+
+  const handleAddItem = async () => {
+    if (!session) {
+      Alert.alert("No active session", "Start a shopping session first.");
+      return;
+    }
+
+    const trimmedName = itemName.trim();
+    const parsedQuantity = Number(itemQuantity);
+    const parsedPrice = Number(itemPrice);
+
+    if (!trimmedName) { Alert.alert("Missing item name", "Enter an item name."); return; }
+    if (!Number.isFinite(parsedQuantity) || parsedQuantity <= 0) { Alert.alert("Invalid quantity", "Quantity must be at least 1."); return; }
+
+    // Price is required — must be a positive number
+    if (!itemPrice.trim() || !Number.isFinite(parsedPrice) || parsedPrice <= 0) {
+      setPriceError(true);
+      priceInputRef.current?.focus();
+      Alert.alert(
+        "Price required",
+        "Enter the price for this item at the current store."
+      );
+      return;
+    }
+
+    setPriceError(false);
+
+    setSaving(true);
+
+    try {
+      const existingResult = await searchItems(trimmedName);
+      let itemId: number | null = null;
+
+      if (existingResult.ok) {
+        const exactMatch = existingResult.data.find(
+          (i) => i.name.toLowerCase() === trimmedName.toLowerCase()
+        );
+        if (exactMatch) itemId = exactMatch.id;
+      }
+
+      if (itemId === null) {
+        const createdResult = await createItem({ name: trimmedName, favorite: false });
+        if (!createdResult.ok) { Alert.alert("Could not add item", createdResult.error); return; }
+        itemId = createdResult.data.id;
+      }
+
+      const addResult = await addSessionItem({
+        sessionId: session.id,
+        itemId,
+        quantity: parsedQuantity,
+        price: parsedPrice,
+      });
+
+      if (!addResult.ok) { Alert.alert("Could not add item", addResult.error); return; }
+
+      await upsertStoreItemPrice({ storeId: session.storeId, itemId, latestPrice: parsedPrice });
+
+      closeModal();
+      await loadSession();
+    } catch (error) {
+      Alert.alert("Could not add item", error instanceof Error ? error.message : "Unknown error");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const runningTotal = useMemo(() => session?.total ?? 0, [session]);
+
+  const remainingBudget = useMemo(() => {
+    if (!session) return 0;
     return session.budget - runningTotal;
   }, [session, runningTotal]);
 
   const purchasedCount = items.filter((item) => item.purchased).length;
 
-  const refreshAfterChange = async () => {
-    await loadSession();
-  };
-
-  const handleAddItem = () => {
-    router.push("/quick-add-screen");
-  };
-
-  const handleEditItem = async (item: SessionItemRow) => {
+  const handleIncrementQty = async (item: SessionItemRow) => {
     setBusyItemId(item.id);
-
     try {
-      const nextQuantity = item.quantity + 1;
-      const result = await updateSessionItemQuantity(item.id, nextQuantity);
-
-      if (!result.ok) {
-        Alert.alert("Could not update item", result.error);
-        return;
-      }
-
-      await refreshAfterChange();
+      const result = await updateSessionItemQuantity(item.id, item.quantity + 1);
+      if (!result.ok) { Alert.alert("Could not update item", result.error); return; }
+      await loadSession();
     } catch (error) {
-      Alert.alert(
-        "Could not update item",
-        error instanceof Error ? error.message : "Unknown error"
-      );
+      Alert.alert("Could not update item", error instanceof Error ? error.message : "Unknown error");
+    } finally {
+      setBusyItemId(null);
+    }
+  };
+
+  const handleDecrementQty = async (item: SessionItemRow) => {
+    setBusyItemId(item.id);
+    try {
+      const result = await decrementSessionItemQuantity(item.id);
+      if (!result.ok) { Alert.alert("Could not update item", result.error); return; }
+      await loadSession();
+    } catch (error) {
+      Alert.alert("Could not update item", error instanceof Error ? error.message : "Unknown error");
     } finally {
       setBusyItemId(null);
     }
@@ -178,21 +276,12 @@ export default function ShoppingSessionScreen() {
         style: "destructive",
         onPress: async () => {
           setBusyItemId(item.id);
-
           try {
             const result = await deleteSessionItem(item.id);
-
-            if (!result.ok) {
-              Alert.alert("Could not delete item", result.error);
-              return;
-            }
-
-            await refreshAfterChange();
+            if (!result.ok) { Alert.alert("Could not delete item", result.error); return; }
+            await loadSession();
           } catch (error) {
-            Alert.alert(
-              "Could not delete item",
-              error instanceof Error ? error.message : "Unknown error"
-            );
+            Alert.alert("Could not delete item", error instanceof Error ? error.message : "Unknown error");
           } finally {
             setBusyItemId(null);
           }
@@ -203,48 +292,27 @@ export default function ShoppingSessionScreen() {
 
   const handleTogglePurchased = async (item: SessionItemRow) => {
     setBusyItemId(item.id);
-
     try {
       const result = await markSessionItemPurchased(item.id, !item.purchased);
-
-      if (!result.ok) {
-        Alert.alert("Could not update item", result.error);
-        return;
-      }
-
-      await refreshAfterChange();
+      if (!result.ok) { Alert.alert("Could not update item", result.error); return; }
+      await loadSession();
     } catch (error) {
-      Alert.alert(
-        "Could not update item",
-        error instanceof Error ? error.message : "Unknown error"
-      );
+      Alert.alert("Could not update item", error instanceof Error ? error.message : "Unknown error");
     } finally {
       setBusyItemId(null);
     }
   };
 
   const handleFinishSession = async () => {
-    if (!session || readOnlySession) {
-      Alert.alert("No active session", "Start a session first.");
-      return;
-    }
+    if (!session) { Alert.alert("No active session", "Start a session first."); return; }
 
     setSavingSession(true);
-
     try {
       const result = await finishShoppingSession(session.id);
-
-      if (!result.ok) {
-        Alert.alert("Could not finish session", result.error);
-        return;
-      }
-
+      if (!result.ok) { Alert.alert("Could not finish session", result.error); return; }
       router.replace("/transaction-history-screen");
     } catch (error) {
-      Alert.alert(
-        "Could not finish session",
-        error instanceof Error ? error.message : "Unknown error"
-      );
+      Alert.alert("Could not finish session", error instanceof Error ? error.message : "Unknown error");
     } finally {
       setSavingSession(false);
     }
@@ -254,9 +322,7 @@ export default function ShoppingSessionScreen() {
     <SafeAreaView style={styles.safeArea}>
       <View style={styles.screen}>
         <View style={styles.summaryCard}>
-          <Text style={styles.sectionLabel}>
-            {readOnlySession ? "Session Details" : "Current Session"}
-          </Text>
+          <Text style={styles.sectionLabel}>Current Session</Text>
 
           <View style={styles.summaryRow}>
             <View style={styles.summaryBlock}>
@@ -265,12 +331,7 @@ export default function ShoppingSessionScreen() {
             </View>
 
             <View style={styles.summaryBlock}>
-              <Text
-                style={[
-                  styles.summaryValue,
-                  remainingBudget < 0 ? styles.negative : null,
-                ]}
-              >
+              <Text style={[styles.summaryValue, remainingBudget < 0 ? styles.negative : null]}>
                 P{remainingBudget.toFixed(2)}
               </Text>
               <Text style={styles.summaryLabel}>Remaining budget</Text>
@@ -284,14 +345,10 @@ export default function ShoppingSessionScreen() {
         </View>
 
         <View style={styles.listHeader}>
-          <Text style={styles.sectionTitle}>
-            {storeName || "Shopping Items"}
-          </Text>
-          {!readOnlySession ? (
-            <Pressable style={styles.inlineAction} onPress={handleAddItem}>
-              <Text style={styles.inlineActionText}>Add Item</Text>
-            </Pressable>
-          ) : null}
+          <Text style={styles.sectionTitle}>{storeName || "Shopping Items"}</Text>
+          <Pressable style={styles.inlineAction} onPress={openModal}>
+            <Text style={styles.inlineActionText}>Add Item</Text>
+          </Pressable>
         </View>
 
         {loading ? (
@@ -301,13 +358,9 @@ export default function ShoppingSessionScreen() {
           </View>
         ) : !session ? (
           <View style={styles.emptyState}>
-            <Text style={styles.emptyTitle}>
-              {readOnlySession ? "Session not found" : "No active session"}
-            </Text>
+            <Text style={styles.emptyTitle}>No active session</Text>
             <Text style={styles.emptyText}>
-              {readOnlySession
-                ? "This session could not be loaded."
-                : "Start a shopping session from Home before adding items."}
+              Start a shopping session from Home before adding items.
             </Text>
           </View>
         ) : (
@@ -323,92 +376,182 @@ export default function ShoppingSessionScreen() {
                     <Text style={styles.itemName}>{item.name}</Text>
                     <Text style={styles.itemMeta}>{item.storeName}</Text>
                   </View>
-
                   <View style={styles.priceBlock}>
-                    <Text style={styles.itemPrice}>
-                      P{item.subtotal.toFixed(2)}
-                    </Text>
+                    <Text style={styles.itemPrice}>P{item.subtotal.toFixed(2)}</Text>
                     <Text style={styles.itemMeta}>Qty {item.quantity}</Text>
                   </View>
                 </View>
 
-                {!readOnlySession ? (
-                  <>
-                    <View style={styles.itemActionRow}>
-                      <Pressable
-                        style={[styles.itemAction, styles.purchasedAction]}
-                        onPress={() => handleTogglePurchased(item)}
-                        disabled={busyItemId === item.id}
-                      >
-                        <Text style={styles.itemActionText}>
-                          {item.purchased ? "Purchased" : "Mark Purchased"}
-                        </Text>
-                      </Pressable>
+                <View style={styles.itemActionRow}>
+                  <Pressable
+                    style={[styles.itemAction, styles.purchasedAction]}
+                    onPress={() => handleTogglePurchased(item)}
+                    disabled={busyItemId === item.id}
+                  >
+                    <Text style={styles.itemActionText}>
+                      {item.purchased ? "✓ Done" : "Mark Done"}
+                    </Text>
+                  </Pressable>
 
-                      <Pressable
-                        style={styles.itemAction}
-                        onPress={() => handleEditItem(item)}
-                        disabled={busyItemId === item.id}
-                      >
-                        <Text style={styles.itemActionText}>Qty +1</Text>
-                      </Pressable>
+                  <View style={styles.qtyControls}>
+                    <Pressable
+                      style={styles.qtyBtn}
+                      onPress={() => handleDecrementQty(item)}
+                      disabled={busyItemId === item.id}
+                    >
+                      <Text style={styles.qtyBtnText}>−</Text>
+                    </Pressable>
+                    <Text style={styles.qtyValue}>{item.quantity}</Text>
+                    <Pressable
+                      style={styles.qtyBtn}
+                      onPress={() => handleIncrementQty(item)}
+                      disabled={busyItemId === item.id}
+                    >
+                      <Text style={styles.qtyBtnText}>+</Text>
+                    </Pressable>
+                  </View>
 
-                      <Pressable
-                        style={styles.itemAction}
-                        onPress={() => handleDeleteItem(item)}
-                        disabled={busyItemId === item.id}
-                      >
-                        <Text style={styles.itemActionText}>Delete</Text>
-                      </Pressable>
-                    </View>
+                  <Pressable
+                    style={[styles.itemAction, styles.deleteAction]}
+                    onPress={() => handleDeleteItem(item)}
+                    disabled={busyItemId === item.id}
+                  >
+                    <Text style={styles.itemActionText}>Delete</Text>
+                  </Pressable>
+                </View>
 
-                    {busyItemId === item.id ? (
-                      <Text style={styles.busyText}>Updating...</Text>
-                    ) : null}
-                  </>
+                {busyItemId === item.id ? (
+                  <Text style={styles.busyText}>Updating...</Text>
                 ) : null}
               </View>
             )}
             ListEmptyComponent={
               <View style={styles.emptyState}>
                 <Text style={styles.emptyTitle}>No items yet</Text>
-                <Text style={styles.emptyText}>
-                  Add the first item to start the session.
-                </Text>
+                <Text style={styles.emptyText}>Tap Add Item or + to start.</Text>
               </View>
             }
           />
         )}
 
-        {!readOnlySession ? (
-          <>
-            <View style={styles.bottomBar}>
-              <Pressable
-                style={[styles.finishButton, savingSession && styles.disabledButton]}
-                onPress={handleFinishSession}
-                disabled={savingSession}
-              >
-                <Text style={styles.finishButtonText}>
-                  {savingSession ? "Finishing..." : "Finish Session"}
+        <View style={styles.bottomBar}>
+          <Pressable
+            style={[styles.finishButton, savingSession && styles.disabledButton]}
+            onPress={handleFinishSession}
+            disabled={savingSession}
+          >
+            <Text style={styles.finishButtonText}>
+              {savingSession ? "Finishing..." : "Finish Session"}
+            </Text>
+          </Pressable>
+        </View>
+
+        <Pressable style={styles.floatingButton} onPress={openModal}>
+          <Text style={styles.floatingButtonText}>+</Text>
+        </Pressable>
+      </View>
+
+      {/* Add Item Bottom Sheet */}
+      <Modal
+        visible={modalVisible}
+        animationType="slide"
+        transparent
+        onRequestClose={closeModal}
+      >
+        <Pressable style={styles.modalBackdrop} onPress={closeModal} />
+
+        <View style={styles.modalSheet}>
+          <View style={styles.modalHandle} />
+
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle}>Add Item</Text>
+            <Pressable style={styles.modalCloseButton} onPress={closeModal}>
+              <Text style={styles.modalCloseText}>✕</Text>
+            </Pressable>
+          </View>
+
+          <ScrollView
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+            contentContainerStyle={styles.modalBody}
+          >
+            <Text style={styles.fieldLabel}>Item name</Text>
+            <TextInput
+              ref={nameInputRef}
+              value={itemName}
+              onChangeText={setItemName}
+              placeholder="e.g. Milk"
+              style={styles.input}
+              placeholderTextColor="#8C8C81"
+              returnKeyType="next"
+            />
+
+            {searching ? (
+              <View style={styles.suggestionsRow}>
+                <ActivityIndicator size="small" />
+              </View>
+            ) : searchResults.length > 0 ? (
+              <View style={styles.suggestions}>
+                {searchResults.map((item) => (
+                  <Pressable
+                    key={item.id}
+                    style={styles.suggestionItem}
+                    onPress={() => handlePickSuggestion(item)}
+                  >
+                    <Text style={styles.suggestionText}>{item.name}</Text>
+                    {item.favorite ? <Text style={styles.suggestionStar}>★</Text> : null}
+                  </Pressable>
+                ))}
+              </View>
+            ) : null}
+
+            <View style={styles.modalRow}>
+              <View style={styles.modalField}>
+                <Text style={styles.fieldLabel}>Qty</Text>
+                <TextInput
+                  value={itemQuantity}
+                  onChangeText={setItemQuantity}
+                  placeholder="1"
+                  keyboardType="numeric"
+                  style={styles.input}
+                  placeholderTextColor="#8C8C81"
+                />
+              </View>
+
+              <View style={styles.modalField}>
+                <Text style={[styles.fieldLabel, priceError && styles.fieldLabelError]}>
+                  Price{priceError ? " — required" : ""}
                 </Text>
-              </Pressable>
+                <TextInput
+                  ref={priceInputRef}
+                  value={itemPrice}
+                  onChangeText={(v) => { setItemPrice(v); if (priceError) setPriceError(false); }}
+                  placeholder="0.00"
+                  keyboardType="decimal-pad"
+                  style={[styles.input, priceError && styles.inputError]}
+                  placeholderTextColor="#8C8C81"
+                />
+              </View>
             </View>
 
-            <Pressable style={styles.floatingButton} onPress={handleAddItem}>
-              <Text style={styles.floatingButtonText}>+</Text>
+            <Pressable
+              style={[styles.primaryButton, saving && styles.disabledButton]}
+              onPress={handleAddItem}
+              disabled={saving}
+            >
+              <Text style={styles.primaryButtonText}>
+                {saving ? "Adding..." : "Add to Session"}
+              </Text>
             </Pressable>
-          </>
-        ) : null}
-      </View>
+          </ScrollView>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  safeArea: {
-    flex: 1,
-    backgroundColor: "#F7F7F2",
-  },
+  safeArea: { flex: 1, backgroundColor: "#F7F7F2" },
   screen: {
     flex: 1,
     paddingHorizontal: 16,
@@ -419,15 +562,10 @@ const styles = StyleSheet.create({
   summaryCard: {
     backgroundColor: "#FFFFFF",
     borderRadius: 20,
-    padding: 20,
+    padding: 18,
     borderWidth: 1,
     borderColor: "#E7E4DA",
     gap: 14,
-    shadowColor: "#000",
-    shadowOpacity: 0.04,
-    shadowRadius: 8,
-    shadowOffset: { width: 0, height: 2 },
-    elevation: 2,
   },
   sectionLabel: {
     fontSize: 12,
@@ -436,40 +574,13 @@ const styles = StyleSheet.create({
     letterSpacing: 0.8,
     color: "#6B6B63",
   },
-  summaryRow: {
-    flexDirection: "row",
-    gap: 12,
-  },
-  summaryBlock: {
-    flex: 1,
-    backgroundColor: "#F4F2E9",
-    borderRadius: 16,
-    padding: 16,
-  },
-  summaryValue: {
-    fontSize: 30,
-    fontWeight: "900",
-    color: "#111111",
-    letterSpacing: -0.5,
-  },
-  negative: {
-    color: "#A11E1E",
-  },
-  summaryLabel: {
-    marginTop: 2,
-    fontSize: 13,
-    color: "#5B5B53",
-    fontWeight: "600",
-  },
-  summaryMetaRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-  },
-  summaryMeta: {
-    fontSize: 13,
-    color: "#5B5B53",
-    fontWeight: "600",
-  },
+  summaryRow: { flexDirection: "row", gap: 12 },
+  summaryBlock: { flex: 1, backgroundColor: "#F4F2E9", borderRadius: 16, padding: 14 },
+  summaryValue: { fontSize: 28, fontWeight: "900", color: "#111111" },
+  negative: { color: "#A11E1E" },
+  summaryLabel: { marginTop: 2, fontSize: 13, color: "#5B5B53", fontWeight: "600" },
+  summaryMetaRow: { flexDirection: "row", justifyContent: "space-between" },
+  summaryMeta: { fontSize: 13, color: "#5B5B53", fontWeight: "600" },
   listHeader: {
     marginTop: 18,
     marginBottom: 10,
@@ -477,11 +588,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "space-between",
   },
-  sectionTitle: {
-    fontSize: 18,
-    fontWeight: "800",
-    color: "#111111",
-  },
+  sectionTitle: { fontSize: 18, fontWeight: "800", color: "#111111" },
   inlineAction: {
     minHeight: 44,
     paddingHorizontal: 14,
@@ -490,25 +597,10 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  inlineActionText: {
-    color: "#FFFFFF",
-    fontSize: 14,
-    fontWeight: "800",
-  },
-  loadingRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    paddingVertical: 10,
-  },
-  loadingText: {
-    fontSize: 14,
-    color: "#5B5B53",
-  },
-  listContent: {
-    paddingBottom: 16,
-    gap: 12,
-  },
+  inlineActionText: { color: "#FFFFFF", fontSize: 14, fontWeight: "800" },
+  loadingRow: { flexDirection: "row", alignItems: "center", gap: 10, paddingVertical: 10 },
+  loadingText: { fontSize: 14, color: "#5B5B53" },
+  listContent: { paddingBottom: 16, gap: 12 },
   itemCard: {
     backgroundColor: "#FFFFFF",
     borderRadius: 18,
@@ -516,11 +608,6 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "#E7E4DA",
     gap: 12,
-    shadowColor: "#000",
-    shadowOpacity: 0.03,
-    shadowRadius: 6,
-    shadowOffset: { width: 0, height: 1 },
-    elevation: 1,
   },
   itemMainRow: {
     flexDirection: "row",
@@ -528,33 +615,12 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     gap: 12,
   },
-  itemInfo: {
-    flex: 1,
-    gap: 4,
-  },
-  itemName: {
-    fontSize: 17,
-    fontWeight: "800",
-    color: "#111111",
-  },
-  itemMeta: {
-    fontSize: 13,
-    color: "#6B6B63",
-    fontWeight: "600",
-  },
-  priceBlock: {
-    alignItems: "flex-end",
-    gap: 2,
-  },
-  itemPrice: {
-    fontSize: 17,
-    fontWeight: "900",
-    color: "#111111",
-  },
-  itemActionRow: {
-    flexDirection: "row",
-    gap: 10,
-  },
+  itemInfo: { flex: 1, gap: 4 },
+  itemName: { fontSize: 17, fontWeight: "800", color: "#111111" },
+  itemMeta: { fontSize: 13, color: "#6B6B63", fontWeight: "600" },
+  priceBlock: { alignItems: "flex-end", gap: 2 },
+  itemPrice: { fontSize: 17, fontWeight: "900", color: "#111111" },
+  itemActionRow: { flexDirection: "row", gap: 10 },
   itemAction: {
     flex: 1,
     minHeight: 44,
@@ -564,63 +630,43 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     paddingHorizontal: 10,
   },
-  purchasedAction: {
-    backgroundColor: "#DDE8D8",
-    borderWidth: 1,
-    borderColor: "#B8D4B0",
-  },
-  itemActionText: {
-    fontSize: 13,
-    fontWeight: "800",
-    color: "#111111",
-    textAlign: "center",
-  },
-  busyText: {
-    fontSize: 12,
-    color: "#5B5B53",
-    fontWeight: "600",
-  },
-  emptyState: {
-    paddingVertical: 40,
+  purchasedAction: { backgroundColor: "#DDE8D8", borderWidth: 1, borderColor: "#B8D4B0" },
+  deleteAction: { backgroundColor: "#F5DDD8" },
+  itemActionText: { fontSize: 13, fontWeight: "800", color: "#111111", textAlign: "center" },
+  qtyControls: {
+    flexDirection: "row",
     alignItems: "center",
-    gap: 6,
+    backgroundColor: "#EDEADE",
+    borderRadius: 14,
+    overflow: "hidden",
   },
-  emptyTitle: {
-    fontSize: 18,
-    fontWeight: "800",
-    color: "#111111",
+  qtyBtn: {
+    width: 40,
+    height: 44,
+    alignItems: "center",
+    justifyContent: "center",
   },
-  emptyText: {
-    fontSize: 14,
-    color: "#5B5B53",
-    textAlign: "center",
-  },
-  bottomBar: {
-    position: "absolute",
-    left: 16,
-    right: 16,
-    bottom: 18,
-  },
+  qtyBtnText: { fontSize: 20, fontWeight: "700", color: "#111111", lineHeight: 24 },
+  qtyValue: { fontSize: 15, fontWeight: "800", color: "#111111", minWidth: 28, textAlign: "center" },
+  busyText: { fontSize: 12, color: "#5B5B53", fontWeight: "600" },
+  emptyState: { paddingVertical: 40, alignItems: "center", gap: 6 },
+  emptyTitle: { fontSize: 18, fontWeight: "800", color: "#111111" },
+  emptyText: { fontSize: 14, color: "#5B5B53", textAlign: "center" },
+  bottomBar: { position: "absolute", left: 16, right: 16, bottom: 18 },
   finishButton: {
-    minHeight: 56,
+    minHeight: 54,
     borderRadius: 16,
     backgroundColor: "#111111",
     alignItems: "center",
     justifyContent: "center",
     shadowColor: "#000000",
-    shadowOpacity: 0.18,
-    shadowRadius: 12,
+    shadowOpacity: 0.12,
+    shadowRadius: 10,
     shadowOffset: { width: 0, height: 4 },
-    elevation: 5,
+    elevation: 4,
   },
-  disabledButton: {
-    opacity: 0.6,
-  },
-  finishButtonText: {
-    color: "#FFFFFF",
-    fontSize: 16,
-    fontWeight: "800",
-  },
+  disabledButton: { opacity: 0.6 },
+  finishButtonText: { color: "#FFFFFF", fontSize: 16, fontWeight: "800" },
   floatingButton: {
     position: "absolute",
     right: 16,
@@ -637,10 +683,87 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 5 },
     elevation: 5,
   },
-  floatingButtonText: {
-    color: "#FFFFFF",
-    fontSize: 28,
-    lineHeight: 30,
-    fontWeight: "700",
+  floatingButtonText: { color: "#FFFFFF", fontSize: 28, lineHeight: 30, fontWeight: "700" },
+  // bottom sheet
+  modalBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.4)" },
+  modalSheet: {
+    backgroundColor: "#FFFFFF",
+    borderTopLeftRadius: 28,
+    borderTopRightRadius: 28,
+    paddingBottom: 34,
+    maxHeight: "85%",
   },
+  modalHandle: {
+    width: 40,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: "#D7D3C7",
+    alignSelf: "center",
+    marginTop: 12,
+    marginBottom: 4,
+  },
+  modalHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingHorizontal: 20,
+    paddingVertical: 14,
+  },
+  modalTitle: { fontSize: 20, fontWeight: "800", color: "#111111" },
+  modalCloseButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: "#EDEADE",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  modalCloseText: { fontSize: 14, fontWeight: "700", color: "#111111" },
+  modalBody: { paddingHorizontal: 20, paddingBottom: 8, gap: 10 },
+  modalRow: { flexDirection: "row", gap: 12 },
+  modalField: { flex: 1, gap: 4 },
+  fieldLabel: { fontSize: 13, fontWeight: "700", color: "#5B5B53" },
+  fieldLabelError: { color: "#A11E1E" },
+  input: {
+    minHeight: 52,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "#D7D3C7",
+    backgroundColor: "#FBFBF7",
+    paddingHorizontal: 14,
+    fontSize: 16,
+    color: "#111111",
+  },
+  inputError: {
+    borderColor: "#A11E1E",
+    backgroundColor: "#FDF4F4",
+  },
+  suggestionsRow: { paddingVertical: 8, alignItems: "flex-start" },
+  suggestions: {
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "#E7E4DA",
+    overflow: "hidden",
+  },
+  suggestionItem: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingHorizontal: 14,
+    paddingVertical: 13,
+    backgroundColor: "#FFFFFF",
+    borderBottomWidth: 1,
+    borderBottomColor: "#F0EDE4",
+  },
+  suggestionText: { fontSize: 15, fontWeight: "600", color: "#111111" },
+  suggestionStar: { fontSize: 14, color: "#C8A84B" },
+  primaryButton: {
+    marginTop: 4,
+    minHeight: 54,
+    borderRadius: 16,
+    backgroundColor: "#111111",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  primaryButtonText: { color: "#FFFFFF", fontSize: 16, fontWeight: "800" },
 });

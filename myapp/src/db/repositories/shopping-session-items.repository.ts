@@ -55,8 +55,27 @@ export async function addSessionItem(input: {
 }): Promise<Result<ShoppingSessionItem>> {
   try {
     const db = await getDatabaseAsync();
-    const subtotal = input.quantity * input.price;
 
+    // If item already exists in this session, increment quantity instead of inserting
+    const existing = await db.getFirstAsync<ShoppingSessionItemRow>(
+      "SELECT id, session_id, item_id, quantity, price, subtotal, purchased FROM shopping_session_items WHERE session_id = ? AND item_id = ?",
+      [input.sessionId, input.itemId]
+    );
+
+    if (existing) {
+      const newQty = existing.quantity + input.quantity;
+      const newSubtotal = newQty * input.price;
+      await db.runAsync(
+        "UPDATE shopping_session_items SET quantity = ?, price = ?, subtotal = ? WHERE id = ?",
+        [newQty, input.price, newSubtotal, existing.id]
+      );
+      await recalculateSessionTotalAsync(input.sessionId);
+      const updated = await getSessionItemById(existing.id);
+      if (!updated.ok || !updated.data) return fail("Could not reload updated item.");
+      return ok(updated.data);
+    }
+
+    const subtotal = input.quantity * input.price;
     const result = await db.runAsync(
       `
       INSERT INTO shopping_session_items
@@ -67,13 +86,8 @@ export async function addSessionItem(input: {
     );
 
     const created = await getSessionItemById(result.lastInsertRowId);
-    if (!created.ok) {
-      return created;
-    }
-
-    if (!created.data) {
-      return fail("Shopping session item was created but could not be loaded.");
-    }
+    if (!created.ok) return created;
+    if (!created.data) return fail("Shopping session item was created but could not be loaded.");
 
     await recalculateSessionTotalAsync(input.sessionId);
     return ok(created.data);
@@ -134,12 +148,9 @@ export async function updateSessionItemQuantity(
       [id]
     );
 
-    if (!row) {
-      return fail("Shopping session item not found.");
-    }
+    if (!row) return fail("Shopping session item not found.");
 
     const subtotal = quantity * row.price;
-
     await db.runAsync(
       "UPDATE shopping_session_items SET quantity = ?, subtotal = ? WHERE id = ?",
       [quantity, subtotal, id]
@@ -147,6 +158,35 @@ export async function updateSessionItemQuantity(
 
     await recalculateSessionTotalAsync(row.session_id);
     return ok(undefined);
+  } catch (error) {
+    return fail(error);
+  }
+}
+
+export async function decrementSessionItemQuantity(id: number): Promise<Result<"deleted" | "updated">> {
+  try {
+    const db = await getDatabaseAsync();
+    const row = await db.getFirstAsync<{ session_id: number; price: number; quantity: number }>(
+      "SELECT session_id, price, quantity FROM shopping_session_items WHERE id = ?",
+      [id]
+    );
+
+    if (!row) return fail("Shopping session item not found.");
+
+    if (row.quantity <= 1) {
+      await db.runAsync("DELETE FROM shopping_session_items WHERE id = ?", [id]);
+      await recalculateSessionTotalAsync(row.session_id);
+      return ok("deleted");
+    }
+
+    const newQty = row.quantity - 1;
+    const subtotal = newQty * row.price;
+    await db.runAsync(
+      "UPDATE shopping_session_items SET quantity = ?, subtotal = ? WHERE id = ?",
+      [newQty, subtotal, id]
+    );
+    await recalculateSessionTotalAsync(row.session_id);
+    return ok("updated");
   } catch (error) {
     return fail(error);
   }

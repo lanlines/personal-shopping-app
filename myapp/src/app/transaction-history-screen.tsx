@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   ActivityIndicator,
+  Modal,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -9,7 +10,16 @@ import {
 } from "react-native";
 import { useRouter } from "expo-router";
 import { listShoppingSessions } from "../db/repositories/shopping-sessions.repository";
-import type { ShoppingSession } from "../db/types";
+import { listItemsBySession } from "../db/repositories/shopping-session-items.repository";
+import { getStoreById } from "../db/repositories/stores.repository";
+import { getItemById } from "../db/repositories/items.repository";
+import type { ShoppingSession, ShoppingSessionItem } from "../db/types";
+
+type TripDetail = {
+  session: ShoppingSession;
+  storeName: string;
+  items: Array<ShoppingSessionItem & { itemName: string }>;
+};
 
 type HistoryFilter = "all" | "completed" | "active";
 
@@ -19,6 +29,8 @@ export default function TransactionHistoryScreen() {
   const [sessions, setSessions] = useState<ShoppingSession[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<HistoryFilter>("all");
+  const [tripDetail, setTripDetail] = useState<TripDetail | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
 
   useEffect(() => {
     let isMounted = true;
@@ -58,6 +70,32 @@ export default function TransactionHistoryScreen() {
 
     return true;
   });
+
+  async function openTripDetail(session: ShoppingSession) {
+    setDetailLoading(true);
+    setTripDetail(null);
+
+    const [storeResult, itemsResult] = await Promise.all([
+      getStoreById(session.storeId),
+      listItemsBySession(session.id),
+    ]);
+
+    const storeName = storeResult.ok && storeResult.data ? storeResult.data.name : "Unknown store";
+    const sessionItems = itemsResult.ok ? itemsResult.data : [];
+
+    const enriched = await Promise.all(
+      sessionItems.map(async (si) => {
+        const itemResult = await getItemById(si.itemId);
+        return {
+          ...si,
+          itemName: itemResult.ok && itemResult.data ? itemResult.data.name : "Unknown item",
+        };
+      })
+    );
+
+    setTripDetail({ session, storeName, items: enriched });
+    setDetailLoading(false);
+  }
 
   const totalSpent = filteredSessions.reduce((sum, session) => sum + session.total, 0);
   const completedCount = sessions.filter((session) => session.finishedAt !== null).length;
@@ -169,12 +207,16 @@ export default function TransactionHistoryScreen() {
               <Pressable
                 key={session.id}
                 style={styles.sessionCard}
-                onPress={() =>
-                  router.push({
-                    pathname: "/shopping-session-screen",
-                    params: { sessionId: String(session.id) },
-                  })
-                }
+                onPress={() => {
+                  if (session.finishedAt) {
+                    openTripDetail(session);
+                  } else {
+                    router.push({
+                      pathname: "/shopping-session-screen",
+                      params: { sessionId: String(session.id) },
+                    });
+                  }
+                }}
               >
                 <View style={styles.sessionTopRow}>
                   <View style={styles.sessionInfo}>
@@ -202,6 +244,75 @@ export default function TransactionHistoryScreen() {
       <Pressable style={styles.homeButton} onPress={() => router.push("/home-screen")}>
         <Text style={styles.homeButtonText}>Back to Home</Text>
       </Pressable>
+
+      <Modal
+        visible={tripDetail !== null || detailLoading}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setTripDetail(null)}
+      >
+        <Pressable style={styles.backdrop} onPress={() => { setTripDetail(null); setDetailLoading(false); }} />
+        <View style={styles.sheet}>
+          <View style={styles.handle} />
+
+          {detailLoading ? (
+            <View style={styles.detailLoading}>
+              <ActivityIndicator />
+              <Text style={styles.loadingText}>Loading trip...</Text>
+            </View>
+          ) : tripDetail ? (
+            <ScrollView showsVerticalScrollIndicator={false}>
+              <Text style={styles.sheetStore}>{tripDetail.storeName}</Text>
+              <Text style={styles.sheetDate}>
+                {new Date(tripDetail.session.createdAt).toLocaleDateString(undefined, {
+                  weekday: "long",
+                  month: "long",
+                  day: "numeric",
+                  year: "numeric",
+                })}
+              </Text>
+
+              <View style={styles.sheetStats}>
+                <View style={styles.sheetStatBlock}>
+                  <Text style={styles.sheetStatValue}>P{tripDetail.session.budget.toFixed(2)}</Text>
+                  <Text style={styles.sheetStatLabel}>Budget</Text>
+                </View>
+                <View style={styles.sheetStatBlock}>
+                  <Text style={styles.sheetStatValue}>P{tripDetail.session.total.toFixed(2)}</Text>
+                  <Text style={styles.sheetStatLabel}>Total spent</Text>
+                </View>
+                <View style={styles.sheetStatBlock}>
+                  <Text style={styles.sheetStatValue}>
+                    P{Math.max(0, tripDetail.session.budget - tripDetail.session.total).toFixed(2)}
+                  </Text>
+                  <Text style={styles.sheetStatLabel}>Saved</Text>
+                </View>
+              </View>
+
+              <Text style={styles.sheetSectionTitle}>Items purchased</Text>
+
+              {tripDetail.items.length === 0 ? (
+                <Text style={styles.emptyText}>No items recorded.</Text>
+              ) : (
+                tripDetail.items.map((item) => (
+                  <View key={item.id} style={styles.tripItemRow}>
+                    <View style={styles.tripItemInfo}>
+                      <Text style={styles.tripItemName}>{item.itemName}</Text>
+                      <Text style={styles.tripItemMeta}>P{item.price.toFixed(2)} × {item.quantity}</Text>
+                    </View>
+                    <Text style={styles.tripItemSubtotal}>P{item.subtotal.toFixed(2)}</Text>
+                  </View>
+                ))
+              )}
+
+              <View style={styles.sheetTotalRow}>
+                <Text style={styles.sheetTotalLabel}>Total</Text>
+                <Text style={styles.sheetTotalValue}>P{tripDetail.session.total.toFixed(2)}</Text>
+              </View>
+            </ScrollView>
+          ) : null}
+        </View>
+      </Modal>
     </ScrollView>
   );
 }
@@ -418,5 +529,117 @@ const styles = StyleSheet.create({
     color: "#FFFFFF",
     fontSize: 16,
     fontWeight: "800",
+  },
+  backdrop: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.4)",
+  },
+  sheet: {
+    backgroundColor: "#F7F7F2",
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    padding: 24,
+    paddingBottom: 40,
+    maxHeight: "80%",
+  },
+  handle: {
+    width: 40,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: "#D0CEC5",
+    alignSelf: "center",
+    marginBottom: 20,
+  },
+  detailLoading: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    paddingVertical: 20,
+  },
+  sheetStore: {
+    fontSize: 26,
+    fontWeight: "900",
+    color: "#111111",
+    letterSpacing: -0.5,
+  },
+  sheetDate: {
+    fontSize: 14,
+    color: "#6B6B63",
+    fontWeight: "600",
+    marginTop: 4,
+    marginBottom: 20,
+  },
+  sheetStats: {
+    flexDirection: "row",
+    gap: 10,
+    marginBottom: 24,
+  },
+  sheetStatBlock: {
+    flex: 1,
+    backgroundColor: "#F4F2E9",
+    borderRadius: 14,
+    padding: 14,
+    gap: 4,
+  },
+  sheetStatValue: {
+    fontSize: 16,
+    fontWeight: "900",
+    color: "#111111",
+  },
+  sheetStatLabel: {
+    fontSize: 12,
+    color: "#6B6B63",
+    fontWeight: "600",
+  },
+  sheetSectionTitle: {
+    fontSize: 15,
+    fontWeight: "800",
+    color: "#111111",
+    marginBottom: 12,
+  },
+  tripItemRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: "#E7E4DA",
+  },
+  tripItemInfo: {
+    flex: 1,
+    gap: 2,
+  },
+  tripItemName: {
+    fontSize: 15,
+    fontWeight: "700",
+    color: "#111111",
+  },
+  tripItemMeta: {
+    fontSize: 13,
+    color: "#6B6B63",
+    fontWeight: "600",
+  },
+  tripItemSubtotal: {
+    fontSize: 15,
+    fontWeight: "800",
+    color: "#111111",
+  },
+  sheetTotalRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingTop: 16,
+    marginTop: 4,
+  },
+  sheetTotalLabel: {
+    fontSize: 15,
+    fontWeight: "800",
+    color: "#111111",
+  },
+  sheetTotalValue: {
+    fontSize: 24,
+    fontWeight: "900",
+    color: "#111111",
+    letterSpacing: -0.5,
   },
 });
