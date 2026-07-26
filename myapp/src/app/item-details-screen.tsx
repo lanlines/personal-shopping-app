@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -13,7 +13,7 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 import { deleteItem, listItems, toggleFavorite } from "../db/repositories/items.repository";
-import { listPriceHistoryForItem } from "../db/repositories/store-items.repository";
+import { listPriceHistoryForItem, upsertStoreItemPrice } from "../db/repositories/store-items.repository";
 import type { Item } from "../db/types";
 
 type PriceHistoryRow = {
@@ -55,6 +55,12 @@ export default function ItemDetailsScreen() {
   const [sheetItem, setSheetItem] = useState<ItemWithPrice | null>(null);
   const [priceHistory, setPriceHistory] = useState<PriceHistoryRow[]>([]);
   const [loadingHistory, setLoadingHistory] = useState(false);
+
+  // Inline price edit state
+  const [editingStoreId, setEditingStoreId] = useState<number | null>(null);
+  const [editPrice, setEditPrice] = useState("");
+  const [savingPrice, setSavingPrice] = useState(false);
+  const editInputRef = useRef<TextInput>(null);
 
   const filteredItems = useMemo(() => {
     const search = query.trim().toLowerCase();
@@ -121,6 +127,46 @@ export default function ItemDetailsScreen() {
   const closeSheet = () => {
     setSheetItem(null);
     setPriceHistory([]);
+    setEditingStoreId(null);
+    setEditPrice("");
+  };
+
+  const startEdit = (row: PriceHistoryRow) => {
+    setEditingStoreId(row.storeId);
+    setEditPrice(String(row.latestPrice));
+    setTimeout(() => editInputRef.current?.focus(), 50);
+  };
+
+  const cancelEdit = () => {
+    setEditingStoreId(null);
+    setEditPrice("");
+  };
+
+  const saveEdit = async (row: PriceHistoryRow) => {
+    const parsed = parseFloat(editPrice);
+    if (!editPrice.trim() || isNaN(parsed) || parsed <= 0) {
+      editInputRef.current?.focus();
+      return;
+    }
+    if (!sheetItem) return;
+    setSavingPrice(true);
+    const result = await upsertStoreItemPrice({
+      storeId: row.storeId,
+      itemId: sheetItem.id,
+      latestPrice: parsed,
+    });
+    if (!result.ok) {
+      Alert.alert("Error", "Could not save price.");
+      setSavingPrice(false);
+      return;
+    }
+    setEditingStoreId(null);
+    setEditPrice("");
+    // Refresh history and item list
+    const updated = await listPriceHistoryForItem(sheetItem.id);
+    setPriceHistory(updated.ok ? updated.data : []);
+    await loadItems();
+    setSavingPrice(false);
   };
 
   const handleToggleFavorite = async (item: ItemWithPrice) => {
@@ -292,15 +338,58 @@ export default function ItemDetailsScreen() {
                 </Text>
               </View>
             ) : (
-              priceHistory.map((row) => (
-                <View key={`${row.storeId}-${row.updatedAt}`} style={styles.historyRow}>
-                  <View style={styles.historyCopy}>
-                    <Text style={styles.rowTitle}>{row.storeName}</Text>
-                    <Text style={styles.rowMeta}>Updated {formatDate(row.updatedAt)}</Text>
+              priceHistory.map((row) => {
+                const isEditing = editingStoreId === row.storeId;
+                return (
+                  <View key={`${row.storeId}-${row.updatedAt}`} style={styles.historyRow}>
+                    <View style={styles.historyCopy}>
+                      <Text style={styles.rowTitle}>{row.storeName}</Text>
+                      {!isEditing && (
+                        <Text style={styles.rowMeta}>Updated {formatDate(row.updatedAt)}</Text>
+                      )}
+                    </View>
+
+                    {isEditing ? (
+                      <View style={styles.editRow}>
+                        <Text style={styles.editCurrency}>P</Text>
+                        <TextInput
+                          ref={editInputRef}
+                          style={styles.editInput}
+                          value={editPrice}
+                          onChangeText={setEditPrice}
+                          keyboardType="decimal-pad"
+                          selectTextOnFocus
+                          editable={!savingPrice}
+                        />
+                        <Pressable
+                          style={styles.editSaveBtn}
+                          onPress={() => saveEdit(row)}
+                          disabled={savingPrice}
+                        >
+                          {savingPrice
+                            ? <ActivityIndicator size="small" color="#FFFFFF" />
+                            : <Text style={styles.editSaveText}>✓</Text>
+                          }
+                        </Pressable>
+                        <Pressable
+                          style={styles.editCancelBtn}
+                          onPress={cancelEdit}
+                          disabled={savingPrice}
+                        >
+                          <Text style={styles.editCancelText}>✕</Text>
+                        </Pressable>
+                      </View>
+                    ) : (
+                      <View style={styles.editRow}>
+                        <Text style={styles.rowValue}>{formatMoney(row.latestPrice)}</Text>
+                        <Pressable style={styles.editIconBtn} onPress={() => startEdit(row)}>
+                          <Text style={styles.editIconText}>Edit</Text>
+                        </Pressable>
+                      </View>
+                    )}
                   </View>
-                  <Text style={styles.rowValue}>{formatMoney(row.latestPrice)}</Text>
-                </View>
-              ))
+                );
+              })
             )}
 
             {/* Actions */}
@@ -479,6 +568,67 @@ const styles = StyleSheet.create({
   rowTitle: { fontSize: 14, fontWeight: "700", color: "#111111" },
   rowMeta: { fontSize: 12, color: "#6B6B63" },
   rowValue: { fontSize: 15, fontWeight: "800", color: "#111111" },
+
+  // Inline price edit
+  editRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
+  editCurrency: {
+    fontSize: 15,
+    fontWeight: "800",
+    color: "#111111",
+  },
+  editInput: {
+    width: 80,
+    height: 36,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "#D7D3C7",
+    backgroundColor: "#FFFFFF",
+    paddingHorizontal: 10,
+    fontSize: 15,
+    fontWeight: "700",
+    color: "#111111",
+  },
+  editSaveBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    backgroundColor: "#111111",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  editSaveText: {
+    color: "#FFFFFF",
+    fontSize: 16,
+    fontWeight: "800",
+  },
+  editCancelBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    backgroundColor: "#EDEADE",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  editCancelText: {
+    color: "#111111",
+    fontSize: 16,
+    fontWeight: "800",
+  },
+  editIconBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 10,
+    backgroundColor: "#EDEADE",
+  },
+  editIconText: {
+    fontSize: 13,
+    fontWeight: "700",
+    color: "#111111",
+  },
 
   // Sheet actions
   sheetActions: { flexDirection: "row", gap: 10, marginTop: 4 },
