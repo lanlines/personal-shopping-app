@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
+  Image,
   Modal,
   Pressable,
   ScrollView,
@@ -12,7 +13,9 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
-import { deleteItem, listItems, toggleFavorite } from "../db/repositories/items.repository";
+import * as ImagePicker from "expo-image-picker";
+import * as FileSystem from "expo-file-system/legacy";
+import { deleteItem, listItems, toggleFavorite, updateItem } from "../db/repositories/items.repository";
 import { listPriceHistoryForItem, upsertStoreItemPrice } from "../db/repositories/store-items.repository";
 import type { Item } from "../db/types";
 
@@ -184,6 +187,65 @@ export default function ItemDetailsScreen() {
     setBusyId(null);
   };
 
+  const handlePickImage = async (item: ItemWithPrice) => {
+    Alert.alert("Add Photo", "Choose a source", [
+      {
+        text: "Camera",
+        onPress: () => launchImageSource(item, "camera"),
+      },
+      {
+        text: "Photo Library",
+        onPress: () => launchImageSource(item, "library"),
+      },
+      { text: "Cancel", style: "cancel" },
+    ]);
+  };
+
+  const launchImageSource = async (item: ItemWithPrice, source: "camera" | "library") => {
+    if (source === "camera") {
+      const permission = await ImagePicker.requestCameraPermissionsAsync();
+      if (!permission.granted) {
+        Alert.alert("Permission required", "Allow camera access to take photos.");
+        return;
+      }
+    } else {
+      const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!permission.granted) {
+        Alert.alert("Permission required", "Allow photo access to pick images.");
+        return;
+      }
+    }
+
+    const picked = source === "camera"
+      ? await ImagePicker.launchCameraAsync({
+          allowsEditing: true,
+          aspect: [1, 1],
+          quality: 0.7,
+        })
+      : await ImagePicker.launchImageLibraryAsync({
+          mediaTypes: "images",
+          allowsEditing: true,
+          aspect: [1, 1],
+          quality: 0.7,
+        });
+
+    if (picked.canceled) return;
+
+    const uri = picked.assets[0].uri;
+    const filename = uri.split("/").pop()!;
+    const dest = FileSystem.documentDirectory + filename;
+    await FileSystem.copyAsync({ from: uri, to: dest });
+
+    const result = await updateItem(item.id, { imagePath: dest });
+    if (!result.ok) {
+      Alert.alert("Error", "Could not save image.");
+      return;
+    }
+
+    await loadItems();
+    setSheetItem((prev) => prev ? { ...prev, imagePath: dest } : prev);
+  };
+
   const handleDelete = (item: ItemWithPrice) => {
     Alert.alert("Delete Item", `Delete "${item.name}"?`, [
       { text: "Cancel", style: "cancel" },
@@ -245,6 +307,17 @@ export default function ItemDetailsScreen() {
                   onPress={() => openSheet(item)}
                 >
                   <View style={styles.itemRow}>
+                    {item.imagePath ? (
+                      <Image
+                        source={{ uri: item.imagePath }}
+                        style={styles.itemThumb}
+                        resizeMode="cover"
+                      />
+                    ) : (
+                      <View style={styles.itemThumbPlaceholder}>
+                        <Text style={styles.itemThumbPlaceholderText}>?</Text>
+                      </View>
+                    )}
                     <View style={styles.itemInfo}>
                       <View style={styles.itemNameRow}>
                         <Text style={styles.itemName}>{item.name}</Text>
@@ -287,6 +360,15 @@ export default function ItemDetailsScreen() {
           <View style={styles.sheetHandle} />
 
           <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.sheetContent}>
+            {/* Item image */}
+            {sheetItem?.imagePath ? (
+              <Image
+                source={{ uri: sheetItem.imagePath }}
+                style={styles.sheetImage}
+                resizeMode="cover"
+              />
+            ) : null}
+
             {/* Header */}
             <View style={styles.sheetHeader}>
               <View style={styles.sheetTitleBlock}>
@@ -404,6 +486,15 @@ export default function ItemDetailsScreen() {
                 </Text>
               </Pressable>
               <Pressable
+                style={styles.sheetActionBtn}
+                onPress={() => sheetItem && handlePickImage(sheetItem)}
+                disabled={busyId === sheetItem?.id}
+              >
+                <Text style={styles.sheetActionText}>
+                  {sheetItem?.imagePath ? "Change Photo" : "Add Photo"}
+                </Text>
+              </Pressable>
+              <Pressable
                 style={[styles.sheetActionBtn, styles.deleteBtn]}
                 onPress={() => sheetItem && handleDelete(sheetItem)}
                 disabled={busyId === sheetItem?.id}
@@ -475,6 +566,24 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     gap: 12,
   },
+  itemThumb: {
+    width: 48,
+    height: 48,
+    borderRadius: 10,
+  },
+  itemThumbPlaceholder: {
+    width: 48,
+    height: 48,
+    borderRadius: 10,
+    backgroundColor: "#F4F2E9",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  itemThumbPlaceholderText: {
+    fontSize: 20,
+    color: "#C0BDB4",
+    fontWeight: "700",
+  },
   itemInfo: { flex: 1, gap: 4 },
   itemNameRow: { flexDirection: "row", alignItems: "center", gap: 6 },
   itemName: { fontSize: 16, fontWeight: "700", color: "#111111" },
@@ -517,6 +626,11 @@ const styles = StyleSheet.create({
     marginBottom: 4,
   },
   sheetContent: { paddingHorizontal: 24, paddingTop: 12, gap: 16 },
+  sheetImage: {
+    width: "100%",
+    height: 180,
+    borderRadius: 16,
+  },
   sheetHeader: {
     flexDirection: "row",
     justifyContent: "space-between",
@@ -631,7 +745,7 @@ const styles = StyleSheet.create({
   },
 
   // Sheet actions
-  sheetActions: { flexDirection: "row", gap: 10, marginTop: 4 },
+  sheetActions: { flexDirection: "row", gap: 10, marginTop: 4, flexWrap: "wrap" },
   sheetActionBtn: {
     flex: 1,
     minHeight: 48,
